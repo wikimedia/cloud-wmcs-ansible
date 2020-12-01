@@ -1,0 +1,78 @@
+---
+- name: Start a new etcd instance
+  block:
+    - name: Openstack actions
+      block:
+        - name: Ensuring etcd server group exists
+          openstack.cloud.server_group:
+            state: present
+            auth: &openstack_auth
+              auth_url: "{{openstack_auth_url}}"
+              username: "{{openstack_username}}"
+              password: "{{openstack_password}}"
+              project_name: "{{openstack_project}}"
+              user_domain_name: "{{openstack_user_domain_name}}"
+              project_domain_name: "{{openstack_project_domain_name}}"
+            name: "{{toolforge_etcd_server_group}}"
+            policies:
+              - anti-affinity
+          register: server_group_info
+
+        - name: Ensuring etcd/k8s security group exists
+          openstack.cloud.security_group:
+            auth:
+              <<: *openstack_auth
+            state: present
+            name: "{{toolforge_etcd_security_group}}"
+            description: |
+              This group provides full access from its members to its members. Meant
+              to be used for k8s worker and control nodes.
+          register: security_group_info
+
+        - name: Add the etcd/k8s security group rules if it did not exist
+          when:
+            - security_group_info.changed
+          block:
+            - openstack.cloud.security_group_rule:
+                auth:
+                  <<: *openstack_auth
+                direction: egress
+                security_group: "{{toolforge_etcd_security_group}}"
+                protocol: any
+                remote_group: "{{toolforge_etcd_security_group}}"
+                state: present
+
+            - openstack.cloud.security_group_rule:
+                auth:
+                  <<: *openstack_auth
+                direction: ingress
+                security_group: "{{toolforge_etcd_security_group}}"
+                protocol: any
+                remote_group: "{{toolforge_etcd_security_group}}"
+                state: present
+
+        - name: Start a new etcd plain instance
+          vars:
+            prefix: "{{toolforge_etcd_prefix}}"
+            security_group_name: "{{toolforge_etcd_security_group}}"
+            server_group_uuid: "{{server_group_info.server_group.id}}"
+          include_role:
+            name: wikimedia.wmcs.common
+            tasks_from: start_instance_from_prefix
+
+    - name: Puppet actions
+      block:
+        - name: Run puppet for the first time (switch puppetmaster if needed)
+          include_role:
+            name: wikimedia.wmcs.common
+            tasks_from: run_puppet_for_the_first_time
+
+        - name: Allow the alternate CAs on the puppetmaster
+          become: true
+          delegate_to: "{{puppetmaster}}"
+          command: "puppet cert --allow-dns-alt-names sign {{new_instance_fqdn}}"
+
+        - name: Run puppet again after allowing alternate names
+          become: true
+          delegate_to: "{{new_instance_fqdn}}"
+          command: run-puppet-agent

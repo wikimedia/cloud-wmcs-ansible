@@ -1,0 +1,246 @@
+---
+- name: Add k8s-etcd node to hiera
+  run_once: true
+  block:
+    - name: Get etcd prefix hiera data
+      wikimedia.wmcs.prefix_enc_info:
+        enc_url: "{{enc_url}}"
+        openstack_project: "{{openstack_project}}"
+        prefix: "{{toolforge_etcd_prefix}}"
+      register: enc_data_result
+
+    - name: Store enc hiera data
+      set_fact:
+        new_prefix_hiera_data: "{{ enc_data_result['enc_data']['hiera'] }}"
+
+    - name: Add node to profile::toolforge::k8s::etcd_nodes
+      when:
+        - new_instance_fqdn not in new_prefix_hiera_data.get('profile::toolforge::k8s::etcd_nodes',[])
+      vars:
+        extra_data:
+          "profile::toolforge::k8s::etcd_nodes": "{{ new_prefix_hiera_data.get('profile::toolforge::k8s::etcd_nodes',[])  + [new_instance_fqdn] | unique }}"
+      set_fact:
+        new_prefix_hiera_data: "{{ new_prefix_hiera_data | combine(extra_data) }}"
+
+    - name: Add node to profile::base::puppet::dns_alt_names
+      when:
+        - new_instance_fqdn not in new_prefix_hiera_data.get('profile::base::puppet::dns_alt_names',[])
+      vars:
+        extra_data:
+          "profile::base::puppet::dns_alt_names": "{{ new_prefix_hiera_data.get('profile::base::puppet::dns_alt_names',[])  + [new_instance_fqdn] | unique }}"
+      set_fact:
+        new_prefix_hiera_data: "{{ new_prefix_hiera_data | combine(extra_data) }}"
+
+    - name: Save the modified hiera data to the enc
+      wikimedia.wmcs.prefix_enc:
+        enc_url: "{{enc_url}}"
+        openstack_project: "{{openstack_project}}"
+        prefix: "{{toolforge_etcd_prefix}}"
+        data: "{{new_prefix_hiera_data | to_nice_yaml}}"
+
+    - name: Give enc a few seconds to refresh caches (it seems it takes some time to be available for puppet)
+      become: false
+      wait_for:
+        timeout: 30
+      delegate_to: localhost
+
+
+- name: Retrieve info on the current etcd cluster
+  block:
+    - name: Reuse an etcd member for control tasks if possible
+      when:
+        - last_instance_fqdn is defined
+        - etcd_control_member is not defined
+      set_fact:
+        etcd_control_member: "{{last_instance_fqdn}}"
+
+    - name: Retrieve an etcd member for control tasks if needed
+      when:
+        - last_instance_fqdn is not defined
+        - etcd_control_member is not defined
+      fail:
+        msg: |
+          TODO: For now you can either run a task that populates the
+          'last_instance_fqdn' var (creating a new instance from prefix) or manually
+          specifying 'etcd_control_member'
+
+    - name: Fetch cluster info
+      become: true
+      delegate_to: "{{etcd_control_member}}"
+      wikimedia.wmcs.etcd_cluster_info:
+        endpoints: "https://{{etcd_control_member}}:2379"
+        cert_file: "/etc/etcd/ssl/{{etcd_control_member}}.pem"
+        key_file: "/etc/etcd/ssl/{{etcd_control_member}}.priv"
+      register: etcdctl_data
+
+- name: Run puppet on all the etcd members
+  become: true
+  loop: "{{etcdctl_data.members | dict2items }}"
+  delegate_to: "{{item['value']['name']}}"
+  command: run-puppet-agent
+
+- name: Add new member to the cluster
+  become: true
+  delegate_to: "{{etcd_control_member}}"
+  block:
+    - name: Ensure that the new meber is in the cluster
+      wikimedia.wmcs.etcd_member:
+        ensure: present
+        endpoints: "https://{{etcd_control_member}}:2379"
+        cert_file: "/etc/etcd/ssl/{{etcd_control_member}}.pem"
+        key_file: "/etc/etcd/ssl/{{etcd_control_member}}.priv"
+        member_fqdn: "{{new_instance_fqdn}}"
+      register: new_member_added_result
+
+    - name: Run puppet on the new member to force etcd daemon to reconnect
+      delegate_to: "{{new_instance_fqdn}}"
+      command: run-puppet-agent
+
+    - name: Give etcd a few seconds to come up
+      become: false
+      wait_for:
+        timeout: 30
+      delegate_to: localhost
+
+    - name: Check that the new member is up
+      vars:
+        new_member_id: "{{new_member_added_result.new_member_id}}"
+      wikimedia.wmcs.etcd_cluster_info:
+        endpoints: "https://{{etcd_control_member}}:2379"
+        cert_file: "/etc/etcd/ssl/{{etcd_control_member}}.pem"
+        key_file: "/etc/etcd/ssl/{{etcd_control_member}}.priv"
+      register: new_etcdctl_data
+      failed_when: new_etcdctl_data.members[new_member_id].status != 'up'
+
+
+- name: Add the new etcd member to apiserver yaml files on the control nodes
+  become: true
+  block:
+    - name: Retrieve the new etcd cluster info
+      delegate_to: "{{etcd_control_member}}"
+      wikimedia.wmcs.etcd_cluster_info:
+        endpoints: "https://{{etcd_control_member}}:2379"
+        cert_file: "/etc/etcd/ssl/{{etcd_control_member}}.pem"
+        key_file: "/etc/etcd/ssl/{{etcd_control_member}}.priv"
+      register: etcd_cluster_info
+
+    - name: Set the new etcd members fact
+      set_fact:
+        new_etcd_members: |
+          {{
+            etcd_cluster_info.members
+            | dict2items
+            | map(attribute='value')
+            | map(attribute='clientURLs', default="")
+            | reject("equalto", "")
+            | flatten
+          }}
+      failed_when:
+        - not new_etcd_members
+
+    - name: Retrieve control nodes info
+      openstack.cloud.server_info:
+        auth:
+          auth_url: "{{openstack_auth_url}}"
+          username: "{{openstack_username}}"
+          password: "{{openstack_password}}"
+          project_name: "{{openstack_project}}"
+          user_domain_name: "{{openstack_user_domain_name}}"
+          project_domain_name: "{{openstack_project_domain_name}}"
+        server: "{{toolforge_k8s_control_prefix}}*"
+      register: k8s_control_servers_info
+
+    - name: Fix the apiserver on the control nodes
+      delegate_to: "{{item.name | replace('********', openstack_project)}}.{{openstack_cloud_domain}}"
+      become: true
+      loop: "{{k8s_control_servers_info.openstack_servers}}"
+      wikimedia.wmcs.k8s_control_apiserver_etcd_servers:
+        etcd_members: "{{new_etcd_members}}"
+
+- name: Fix kubeadm configmap
+  block:
+    - name: Get one of the k8s control node
+      set_fact:
+        k8s_control_node: >-
+          {{
+            (
+              k8s_control_servers_info.openstack_servers
+              | sort(attribute='name')
+            )[-1]['name']
+            | replace('********', openstack_project)
+          }}.{{ openstack_cloud_domain }}
+
+    - name: Add new node to kubeadm-config configmap
+      become: true
+      delegate_to: "{{k8s_control_node}}"
+      block:
+        - name: Retrieve kubeadm-config configmap
+          command: |
+            kubectl --namespace=kube-system get configmap kubeadm-config -o yaml
+          register: configmap_cmd_result
+
+    - name: Load the configmap
+      set_fact:
+        old_configmap: "{{ configmap_cmd_result.stdout | from_yaml }}"
+
+    - name: Load the kubeadm_config (it's a yaml formatted string inside the configmap)
+      set_fact:
+        old_kubeadm_config: "{{ old_configmap.data.ClusterConfiguration | from_yaml }}"
+
+    - name: Add the new etcd member (ugly tricks to update recursively a dict)
+      block:
+        - vars:
+            tmp_external:
+              endpoints: "{{ old_kubeadm_config.etcd.external.endpoints + ['https://' + new_instance_fqdn + ':2379']}}"
+          set_fact:
+            new_external: "{{ old_kubeadm_config.etcd.external | combine(tmp_external) }}"
+
+        - vars:
+            tmp_etcd:
+              external: "{{new_external}}"
+          set_fact:
+            new_etcd: "{{ old_kubeadm_config.etcd | combine(tmp_etcd) }}"
+
+        - vars:
+            tmp_kubeadm_config:
+              etcd: "{{new_etcd}}"
+          set_fact:
+            new_kubeadm_config: "{{ old_kubeadm_config | combine(tmp_kubeadm_config) }}"
+
+    - name: Generate the new configmap
+      block:
+        - vars:
+            tmp_data:
+              ClusterConfiguration: "{{ new_kubeadm_config | to_yaml }}"
+          set_fact:
+            new_data: "{{ old_configmap.data | combine(tmp_data) }}"
+
+        - set_fact:
+            new_configmap:
+              apiVersion: "{{ old_configmap.apiVersion }}"
+              kind: "{{ old_configmap.kind }}"
+              data: "{{ new_data }}"
+
+    - name: Upload the new configmap
+      block:
+        - vars:
+            tmp_data:
+              ClusterConfiguration: "{{ new_kubeadm_config | to_yaml }}"
+          set_fact:
+            new_data: "{{ old_configmap.data | combine(tmp_data) }}"
+
+        - set_fact:
+            new_configmap:
+              apiVersion: "{{ old_configmap.apiVersion }}"
+              kind: "{{ old_configmap.kind }}"
+              data: "{{ new_data }}"
+              metadata:
+                name: kubeadm-config
+                namespace: kube-system
+
+        - name: Run kubectl and uplade the config
+          delegate_to: "{{k8s_control_node}}"
+          become: true
+          shell:
+            cmd: "kubectl apply -f -"
+            stdin: "{{ new_configmap | to_yaml }}"

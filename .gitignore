@@ -1,0 +1,7 @@
+*.sw?
+*.py?
+__pycache__
+dist/
+ansible_collections/openstack
+ansible_collections/community
+ansible_collections/wikimedia/wmcs/tests

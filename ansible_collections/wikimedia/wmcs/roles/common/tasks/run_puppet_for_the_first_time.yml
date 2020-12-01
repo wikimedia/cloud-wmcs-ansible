@@ -1,0 +1,65 @@
+---
+# Uses the vars:
+# * new_instance_fqdn
+# * cloudinfra_puppetmaster_member
+#
+#
+# This adds the facts:
+# * puppetmaster(str): fqdn of the puppetmaster
+# * using_project_puppetmaster(bool): if the instance is using a custom project
+#     puppetmaster or not.
+#
+# And a new host to the inventory in the group:
+# * puppetmaster
+#
+
+- name: Run puppet for the first time
+  # The next line is very important so all tasks run by default on the new VM
+  delegate_to: "{{new_instance_fqdn}}"
+  become: true
+  block:
+  - name: Detect the puppetmaster
+    block:
+      - name: Get configured puppetmaster
+        command: puppet config --section agent print server
+        register: puppetmaster_cmd
+
+      - name: Add the puppetmaster fact
+        set_fact:
+          puppetmaster: "{{puppetmaster_cmd.stdout}}"
+          using_project_puppetmaster: true
+
+  - name: Bootstrap when using project specific puppetmaster (client side)
+    block:
+      - name: Rectify puppetmaster if not using project instance
+        when:
+          - puppetmaster == cloudinfra_puppetmaster_domain
+        set_fact:
+          puppetmaster: "{{ cloudinfra_puppetmaster_member }}"
+          using_project_puppetmaster: false
+
+      - name: Remove puppet ssl directory content
+        when:
+          - using_project_puppetmaster
+        command: "rm -rf /var/lib/puppet/ssl/"
+
+  - name: Bootstrap when using project specific puppetmaster (server side)
+    block:
+      - name: Retrieve certs on the master
+        delegate_to: "{{puppetmaster}}"
+        ignore_errors: yes
+        when:
+          - using_project_puppetmaster
+        command: "puppet cert list --all"
+        register: cert_list_result
+
+      - name: Clean the new cert on the master if needed
+        delegate_to: "{{puppetmaster}}"
+        when:
+          - using_project_puppetmaster
+          - new_instance_fqdn in cert_list_result.stdout
+        command: "puppet cert clean {{new_instance_fqdn}}"
+
+  - name: Run puppet for the first time (might fail if using alt names)
+    ignore_errors: yes
+    command: run-puppet-agent

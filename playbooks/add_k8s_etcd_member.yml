@@ -1,0 +1,26 @@
+---
+- name: Create and add a new toolforge etcd instance
+  no_log: false
+  hosts: control
+  vars:
+      enc_url: http://cloud-puppetmaster-03.cloudinfra.eqiad1.wikimedia.cloud:8101/v1
+      openstack_auth_url: http://openstack.eqiad1.wikimediacloud.org:35357/v3
+      openstack_cloud_domain: "{{ openstack_project }}.eqiad1.wikimedia.cloud"
+      openstack_password: "{{ lookup('file', '../../passwordfile') }}"
+      openstack_project: toolsbeta
+      openstack_project_domain_name: default
+      openstack_user_domain_name: Default
+      openstack_username: David Caro
+      toolforge_k8s_control_prefix: toolsbeta-test-k8s-control
+      toolforge_etcd_prefix: toolsbeta-test-k8s-etcd
+
+  tasks:
+    - name: "Start the new instance"
+      import_role:
+        name: wikimedia.wmcs.toolforge_etcd
+        tasks_from: start_instance_from_prefix
+
+    - name: "Add to the existing etcd cluster"
+      import_role:
+        name: wikimedia.wmcs.toolforge_etcd
+        tasks_from: add_instance_to_etcd_cluster

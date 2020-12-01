@@ -1,0 +1,18 @@
+---
+# enc specific
+enc_url: http://some_enc_instance/v1
+openstack_project: dummyproject
+prefix: dummyprefix
+# Openstack specific
+openstack_password: dummy_pass
+openstack_auth_url: http://some_opestack_instance/v3
+openstack_username: Your Username
+openstack_user_domain_name: Default
+openstack_project_domain_name: default
+# TODO: avoid hardcodding the DC
+cloud_domain: "{{openstack_project}}.eqiad1.wikimedia.cloud"
+cloudinfra_puppetmaster_member: "cloud-puppetmaster-03.cloudinfra.eqiad1.wikimedia.cloud"
+cloudinfra_puppetmaster_domain: "puppetmaster.cloudinfra.wmflabs.org"
+
+security_group_name: "{{prefix}}-security-group"
+server_group_uuid: "314159265-314159265-314159265-314159265"

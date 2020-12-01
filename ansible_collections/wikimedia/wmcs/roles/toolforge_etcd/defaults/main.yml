@@ -1,0 +1,16 @@
+---
+# Openstack specific
+openstack_password: dummy_pass
+openstack_auth_url: http://some_opestack_instance/v3
+openstack_username: Your Username
+openstack_user_domain_name: Default
+openstack_project_domain_name: default
+openstack_project: testlabs
+
+enc_url: http://cloud-puppetmaster-03.cloudinfra.eqiad1.wikimedia.cloud:8101/v1
+toolforge_etcd_prefix: dcaro-test-k8s-etcd
+toolforge_k8s_control_prefix: dcaro-test-k8s-control
+
+toolforge_etcd_security_group: "{{openstack_project}}-k8s-full-connectivity"
+toolforge_etcd_server_group: "{{toolforge_etcd_prefix}}"
+

@@ -1,0 +1,7 @@
+# Test with:
+#   ansible-test --test pep8
+#   ansible-test --test validate-modules
+ansible-test
+voluptuous
+pycodestyle
+-r requirements.txt
